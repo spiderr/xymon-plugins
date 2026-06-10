@@ -2,7 +2,11 @@
 
 Monitors Dell server chassis health via Dell OpenManage using `omreport chassis`. Checks fans, intrusion, memory, power supplies, temperatures, voltages, hardware log, and batteries. Reports a `hardware` column to the Xymon server.
 
-Original script by Brian Smith-Sweeney. Version 0.56 (local patched).
+Original script by Brian Smith-Sweeney. Version 0.57 (local patched).
+
+## Changes in v0.57 (local patch)
+
+- Added iDRAC DNS check: set `IDRAC_HOSTNAME` in the script to the DNS name of the server's iDRAC management interface. The script resolves that name and compares the result against the IP reported by `omreport chassis remoteaccess`. A mismatch or failed DNS lookup turns the `hardware` column red.
 
 ## Changes in v0.56 (local patch over upstream v0.55)
 
@@ -33,12 +37,28 @@ Add to `$XYMONCLIENTHOME/etc/clientlaunch.cfg` or drop a file in `clientlaunch.d
     INTERVAL 60s
 ```
 
+## iDRAC DNS check
+
+Set `IDRAC_HOSTNAME` near the top of the script to the expected DNS name for this server's iDRAC:
+
+```bash
+IDRAC_HOSTNAME="idrac-web1.example.com"
+```
+
+Each run the script will:
+1. Read the iDRAC's actual IP from `omreport chassis remoteaccess config=network`
+2. Resolve `IDRAC_HOSTNAME` via `getent hosts`
+3. Compare the two — if they differ or the name does not resolve, the column turns red and the mismatch is shown in the column body
+
+Leave `IDRAC_HOSTNAME=""` to skip the check.
+
 ## How it works
 
 1. Runs `omreport chassis` and extracts the severity column
 2. Determines overall colour from the worst severity found
 3. For each failed component, runs the corresponding level-3 `omreport chassis <component>` command and appends the output
-4. Sends the full report to Xymon including a link to the OpenManage web interface
+4. Optionally checks iDRAC DNS (see above)
+5. Sends the full report to Xymon including a link to the OpenManage web interface
 
 ## Status colour logic
 
@@ -59,4 +79,4 @@ The Xymon column name is `hardware`.
 
 ## Origin
 
-From [`spiderr/xymon-ext`](https://github.com/spiderr/xymon-ext) (v0.55), patched locally to v0.56. Original by Brian Smith-Sweeney, University of California (2002). See script header for full license.
+From [`spiderr/xymon-ext`](https://github.com/spiderr/xymon-ext) (v0.55), patched locally to v0.57. Original by Brian Smith-Sweeney, University of California (2002). See script header for full license.

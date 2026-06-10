@@ -379,6 +379,11 @@ def col_cpu(cpu_tuple, procs, uptime_str, cfg, section):
         for name, pct in procs:
             marker = "  <-- !" if pct >= 20 else ""
             body  += f"  {pct:5.1f}%  {name}{marker}\n"
+    # Embed load average line so TEST2RRD="cpu=la" in xymonserver.cfg causes
+    # xymond_rrd (status channel) to create la.rrd from this status message.
+    # Values are ASA CPU% expressed as load-average numbers; the [la] graph
+    # CDEF divides by 100, so storing 6.00 displays as 6.00 on the Y-axis.
+    body += f"\nload average: {m5:.2f}, {m1:.2f}, {s5:.2f}\n"
     return color, body
 
 
@@ -596,12 +601,8 @@ def poll(name, fqdn, cfg_path, cfg):
     # --- Send columns ---
     c, b = col_cpu(cpu_t, procs, uptime, cfg, section)
     xymon_send_status(xymon_host, xymon_port, fqdn, "cpu", c, b)
-    if cpu_t:
-        # Feed Xymon's built-in [la] graph (TEST2RRD="cpu=la").
-        # la.rrd:la stores value*100; the graph CDEF divides by 100 for display.
-        # We use the 5-min avg as the most stable indicator.
-        xymon_send_data(xymon_host, xymon_port, fqdn, "cpu",
-                        {"la": cpu_t[2] * 100}, rrd_file="la")
+    # la.rrd is created by xymond_rrd (status channel) parsing the "load average:"
+    # line embedded in the cpu message body — no separate data message needed.
 
     c, b = col_memory(mem_t, cfg, section)
     xymon_send_status(xymon_host, xymon_port, fqdn, "memory", c, b)
