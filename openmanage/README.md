@@ -1,82 +1,128 @@
-# openmanage
+# openmanage — Dell PowerEdge hardware check for Xymon
 
-Monitors Dell server chassis health via Dell OpenManage using `omreport chassis`. Checks fans, intrusion, memory, power supplies, temperatures, voltages, hardware log, and batteries. Reports a `hardware` column to the Xymon server.
+Client-side ext script. Reports the **`hardware`** column.
 
-Original script by Brian Smith-Sweeney. Version 0.57 (local patched).
+**Version 1.0.4** — full rewrite for thorough, readable Dell PowerEdge reporting.
 
-## Changes in v0.57 (local patch)
+## What it checks
 
-- Added zero-config iDRAC DNS check: reads iDRAC IP, DNS name, and domain directly from `omreport chassis remoteaccess config=network`, constructs the FQDN, resolves it via `getent hosts`, and compares against the reported IP. A mismatch or failed lookup turns the `hardware` column red. No configuration required.
+| Area | Source | Notes |
+|------|--------|--------|
+| Chassis (fans, memory, PSU, temps, …) | `omreport chassis` | Drill-down on non-Ok components |
+| iDRAC DNS | `omreport chassis remoteaccess` | FQDN must resolve to iDRAC IP |
+| Controllers + battery | `omreport storage` | All controllers |
+| Virtual disks | OMSA + perccli | State machine; **Resynching ≠ rebuild** |
+| Physical disks | OMSA + perccli | Colour by **State** / predictive failure, not third-party `Non-Critical` Status noise |
+| Enclosures | OMSA | Backplane Critical when members fail |
+| Topology, CC/rebuild ops, media errors | **perccli/storcli** if available | Preferred RAID detail |
 
-## Changes in v0.56 (local patch over upstream v0.55)
+### Colour rules (worst wins)
 
-- `grep -A30` instead of `-A9` — captures components beyond position 9 (e.g., Batteries on servers with many sensors)
-- Added `Batteries` case to drill-down loop (`omreport chassis batteries`)
-- Silenced grep with `-q` flag in color-detection `if/elif` to suppress spurious output
+| Condition | Colour |
+|-----------|--------|
+| Failed / offline / missing PD, predictive failure, degraded VD (`Pdgd`/`Dgrd`), critical enclosure | **red** |
+| Rebuild, consistency check, resync, battery learning/charging | **yellow** |
+| All clear | **green** |
+| omreport missing / unreadable states | **purple** |
+
+Third-party disks often show OMSA `Status: Non-Critical` while `State: Online` — those are **not** alarmed.
 
 ## Requirements
 
-- Dell OpenManage Server Administrator installed; `omreport` on `PATH` under `/opt/dell/srvadmin/bin/`
-- bash
-- Standard Xymon client environment (`$XYMON`, `$XYMSRV`, `$MACHINE`, `$XYMONHOME`, `$XYMONTMP`)
+- Dell OMSA (`omreport` under `/opt/dell/srvadmin/bin/`)
+- bash, standard Xymon client env (`XYMONHOME`, `XYMON`, `XYMSRV`/`XYMONDISP`, `MACHINE`)
+- **Optional but recommended:** `perccli64` (or storcli). The `xymon` user usually cannot open the controller — append to the **same** file as other xymon sudos:
+
+```
+# /etc/sudoers.d/xymon  (not a separate drop-in)
+xymon ALL=NOPASSWD: /opt/MegaRAID/perccli/perccli64
+xymon ALL=NOPASSWD: /opt/MegaRAID/perccli/perccli
+```
+
+Snippet for copy/paste: `sudoers.xymon-perccli.snippet`. Without perccli, the check still runs on OMSA alone and notes that RAID CLI is missing.
 
 ## Installation
 
 ```bash
 cp openmanage.sh $XYMONCLIENTHOME/ext/
-chmod +x $XYMONCLIENTHOME/ext/openmanage.sh
+chmod 755 $XYMONCLIENTHOME/ext/openmanage.sh
 ```
 
-Add to `$XYMONCLIENTHOME/etc/clientlaunch.cfg` or drop a file in `clientlaunch.d/`:
+`clientlaunch` snippet (e.g. `/etc/xymon-client/client.d/openmanage.cfg`):
 
 ```
 [openmanage]
-    ENVFILE /etc/xymon/xymonclient.cfg
+    ENVFILE /etc/xymon-client/xymonclient.cfg
     CMD $XYMONCLIENTHOME/ext/openmanage.sh
-    LOGFILE $XYMONCLIENTHOME/logs/openmanage.log
-    INTERVAL 60s
+    LOGFILE $XYMONSERVERLOGS/openmanage.log
+    INTERVAL 15m
 ```
 
-## iDRAC DNS check
+### Dry run (no Xymon send)
 
-Runs automatically with no configuration. Each run the script:
+```bash
+DRY_RUN=1 XYMONHOME=/usr/share/xymon-client XYMONTMP=/dev/shm \
+  MACHINE=$(hostname -f) ./openmanage.sh | less
+```
 
-1. Calls `omreport chassis remoteaccess config=network` and parses the iDRAC IP address, DNS name, and DNS domain name
-2. Constructs the iDRAC FQDN as `DNS iDRAC Name` + `.` + `DNS Domain Name`
-3. Resolves that FQDN via `getent hosts`
-4. Compares the resolved IP against the iDRAC NIC IP — if they differ, or if the name does not resolve, the column turns red
+## Long-running task ETA
 
-The check is skipped silently if `omreport` does not report a DNS iDRAC Name (e.g. iDRAC not configured with a DNS name).
+Consistency check, rebuild, BGI, replace-member progress includes an **ETA** when the client has at least two samples.
 
-## How it works
+- **State file** (client only, not Xymon server / spacey):  
+  `$XYMONHOME/tmp/openmanage-tasks.state` (or `/var/tmp`, `$XYMONTMP`, … first writable)  
+  Override with `OPENMANAGE_STATE_FILE=/path/to/file`.
+- Each line: `key|epoch|percent|label` (up to 6 samples per key).
+- Rate = oldest→newest kept sample; ETA = remaining percent / rate.
+- First run after a new job: `ETA pending`; next interval (e.g. 15m) produces an estimate.
+- Finished jobs: state file cleared when no tasks are active.
 
-1. Runs `omreport chassis` and extracts the severity column
-2. Determines overall colour from the worst severity found
-3. For each failed component, runs the corresponding level-3 `omreport chassis <component>` command and appends the output
-4. Optionally checks iDRAC DNS (see above)
-5. Sends the full report to Xymon including a link to the OpenManage web interface
+## Physical disk init / erase / FORMAT progress
 
-## Status colour logic
+Yellow when any of these are active on a PD:
 
-| OMSA severity | Xymon colour |
-|---|---|
-| All Ok | green |
-| Any Non-Critical | yellow |
-| Any Critical | red |
-| Unrecognised state | purple |
+| Source | What | Progress |
+|--------|------|----------|
+| `perccli … show initialization` | PD clear / init | % + ETA string from perccli |
+| `perccli … show erase` | Secure erase | % + ETA from perccli |
+| `openmanage-pd-sense` (optional) | SCSI **FORMAT UNIT** in progress | % from REQUEST SENSE |
 
-## Known limitation
+perccli alone does **not** report low-level FORMAT UNIT. The sense helper is an **extreme-case** add-on (extra binary + sudo) — **not** deployed fleet-wide.
 
-OMSA messages can exceed Xymon's message size limit. If multiple components fail simultaneously you may see `DATA TRUNCATED` in the column. This is a known upstream limitation.
+Canonical procedure, source links, and when to use the helper:
 
-## Status column
+→ **`~/sysadmin/docs/dell-hardware.md`** (section *PI-formatted disk* / MegaRAID passthrough)
 
-The Xymon column name is `hardware`.
+Helper source in this directory: `openmanage-pd-sense.c` (build only if needed).
 
-## Origin
+## Report layout
 
-From [`spiderr/xymon-ext`](https://github.com/spiderr/xymon-ext) (v0.55), patched locally to v0.57. Original by Brian Smith-Sweeney, University of California (2002). See script header for full license.
+1. **SUMMARY** — `&red` / `&yellow` lines with the actionable facts (slot, SN, CC vs rebuild)
+2. Host / OMSA identity (model, service tag)
+3. Chassis rollup
+4. iDRAC DNS
+5. Controllers + battery (table)
+6. Virtual disks (table)
+7. Physical disks (compact table: ID, State, Status, Pred, media, product, serial)
+8. Enclosures
+9. Full OMSA detail **only for problem PDs**
+10. Full perccli controller summary + VD detail + problem PD `show all` (when CLI available)
+
+## History
+
+| Ver | Notes |
+|-----|--------|
+| 1.0.4 | PD init/erase (perccli) + SCSI FORMAT progress via `openmanage-pd-sense` → yellow + % |
+| 1.0.3 | ETA for CC/rebuild/BGI via client state file (`openmanage-tasks.state`) |
+| 1.0.2 | perccli discovery requires Controller Count &gt; 0 (xymon must use `sudo -n`); UGood disks yellow |
+| 1.0.1 | Discovery avoids slow `/c0 show`; perccli model field fix; enclosure raise dedupe |
+| 1.0.0 | Rewrite: always-on storage inventory, perccli optional, correct CC vs rebuild, PD State-based alerts |
+| 0.58 | Local patch: Storage case + unconditional vdisk check (insufficient — missed failed PDs when chassis had no Storage line) |
+| 0.57 | iDRAC DNS |
+| 0.56 | Batteries, wider chassis grep |
+| 0.55 | Upstream Smith-Sweeney / spiderr lineage |
 
 ## License
 
-Copyright (C) 2002 Regents of the University of California. Free for educational, research, and non-profit use; commercial use requires UC permission. See script header for full terms.
+Original 0.5x header: Copyright (C) 2002 Regents of the University of California (research/non-profit terms in older headers).  
+1.0.x operational rewrite for this environment; treat as internal ops tooling.

@@ -1,0 +1,6 @@
+# Append these lines to /etc/sudoers.d/xymon (do not create a separate drop-in).
+# Existing arch0 file already has MegaCli/storcli/arcconf paths; add perccli for H740P hosts.
+xymon ALL=NOPASSWD: /opt/MegaRAID/perccli/perccli64
+xymon ALL=NOPASSWD: /opt/MegaRAID/perccli/perccli
+# SCSI FORMAT / REQUEST SENSE helper for openmanage.sh PD progress (optional)
+xymon ALL=NOPASSWD: /usr/share/xymon-client/ext/openmanage-pd-sense

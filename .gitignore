@@ -3,3 +3,4 @@ __pycache__/
 *.pyo
 *.db
 *.swp
+openmanage/openmanage-pd-sense
